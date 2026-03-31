@@ -744,19 +744,18 @@ agent runtime
 
 ### 11.1 预处理与 Token 止损保护
 
-在发起“概括总结前文”的需求给模型前，`stripImagesFromMessages` 和 `stripReinjectedAttachments` 会被调用来暴力剔除所有的图像输入以及冗长的静态技能清单补充。这是为了防止因“总结前文这个动作本身”的请求体积过大，就撞到模型的 Token 墙导致请求死锁受限（PTL 异常）。万一触发 PTL，它会回退削减最头部的几次 API Round（损失头部数据）保证程序本身能够无阻运作。
+在发起总结摘要请求给模型前，[`stripImagesFromMessages`](../src/services/compact/compact.ts) 和 [`stripReinjectedAttachments`](../src/services/compact/compact.ts) 会被调用来剔除所有的图像输入以及冗长的静态技能清单附件。这是为了防止因总结请求本身体积过大就撞到模型的 Token 墙导致请求死锁（PTL 异常）。万一触发 PTL，[`truncateHeadForPTLRetry`](../src/services/compact/compact.ts) 会回退削减最头部的几次 API Round 保证程序本身能够无阻运作。
 
 ### 11.2 Session Memory (SM) 直挂与工具链断点保护
 
-这是本项目 Compaction 中最具亮点的工程设计。若系统已开启并处于一段长会话中，它**不会再去调用额外的 API 浪费 Token 给模型总结大意**，而是直接提取 `sessionMemoryCompact.ts` （即后台提取记忆的子 Agent 最新沉淀的 `Session Memory` 文件）直接充当上下文断点（SummaryMessage）。
-更重要的是，在寻找哪部分 Message 该不该丢弃时（`calculateMessagesToKeepIndex`）：
-- 必须优先从后向前留足最低限度配置的下限 Token 的原文（默认保留配置通常约 10K-40K Tokens，及留足近期文本交互数）。
-- 它内置了高度防御的代码逻辑去解决**面条并发问题**：截断时，如果切断位置落在了 `tool_use / tool_result` 执行链的中间（比如刚发出指令，结果在下一条），或者碰到了和 Assistant 共享相同 `message.id` 的 Thinking 流，系统会强制向头部平移 Index 合包这些记录，绝对避免切分出非法的孤立 `tool_result`，从而规避 Anthropic 严格的 API 校验报错。
+这是本项目 Compaction 中最具亮点的工程设计。若系统已开启并处于一段长会话中，它**不会再去调用额外的 API 浪费 Token 给模型总结大意**，而是直接调用 [`trySessionMemoryCompaction`](../src/services/compact/sessionMemoryCompact.ts)，读取后台提取记忆的子 Agent 最新沉淀的 Session Memory 文件直接充当上下文断点（SummaryMessage）。
+更重要的是，在寻找哪部分 Message 该不该丢弃时，由 [`calculateMessagesToKeepIndex`](../src/services/compact/sessionMemoryCompact.ts) 执行精确裁切：
+- 必须优先从后向前留足最低限度配置的下限 Token 的原文（默认保留配置约 10K-40K Tokens），配置通过 [`getSessionMemoryCompactConfig`](../src/services/compact/sessionMemoryCompact.ts) 读取。
+- 它内置了高度防御的代码逻辑去解决**面条并发问题**：截断时，如果切断位置落在了 `tool_use / tool_result` 执行链的中间，或者碰到了和 Assistant 共享相同 `message.id` 的 Thinking 流，[`adjustIndexToPreserveAPIInvariants`](../src/services/compact/sessionMemoryCompact.ts) 会强制向头部平移 Index 合包这些记录，绝对避免切分出非法的孤立 `tool_result`，从而规避 Anthropic 严格的 API 校验报错。
 
 ### 11.3 状态与能力复灌 (Reinjection)
 
-被丢弃打薄的消息转变成了带有 `SystemCompactBoundaryMessage` 且指向 Summary 的短消息。但这有一个致命的副作用：过去抛出给大模型的那些注册在前的可用能力描述（例如 Tool Schemas 和 MCP 远程工具列表等）会被连带着裁剪遗失。所以 Compact 完成后的最后一步，系统会自动把 `FileAttachments`（工作区读取保留）、激活的 Plans 清单，以及重新全量声明当前装载好的外部能力 (`DeferredToolsDeltaAttachment`) 追加回贴入新的队列中。在模型醒来后的第一回合看，虽然前世细节没有了，但是当前的技能蓝图依然齐装满员。
-
+被丢弃打薄的消息转变成了带有 [`SystemCompactBoundaryMessage`](../src/types/message.ts) 且指向 Summary 的短消息，由 [`createCompactBoundaryMessage`](../src/utils/messages.ts) 生成。但这有一个致命的副作用：过去抛出给大模型的那些注册在前的可用能力描述（例如 Tool Schemas 和 MCP 远程工具列表等）会被连带着裁剪遗失。所以 Compact 完成后，[`createPostCompactFileAttachments`](../src/services/compact/compact.ts) 会自动重建 FileAttachments（工作区读取保留）及激活的 Plans 清单，并通过 [`getDeferredToolsDeltaAttachment`](../src/utils/attachments.ts) 重新全量声明当前装载好的外部能力，追加回贴入新的队列中。在模型醒来后的第一回合看，虽然前世细节没有了，但是当前的技能蓝图依然齐装满员。
 
 ## 12. 这套实现的优点与代价
 
