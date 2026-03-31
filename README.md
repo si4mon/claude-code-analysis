@@ -91,20 +91,20 @@ claude-code-analysis/
 
 ### 第三部分：核心机制
 
-- [第四章：Agent Memory 机制是怎么做的](./analysis/04-agent-memory.md)
-- [第五章：Skills 的技术实现细节与运行方式](./analysis/04c-skills-implementation.md)
-- [第六章：Tool Call 机制实现细节](./analysis/04b-tool-call-implementation.md)
-- [第七章：MCP 技术实现细节与运行机制](./analysis/04d-mcp-implementation.md)
-- [第八章：Sandbox 技术实现细节与运行机制](./analysis/04e-sandbox-implementation.md)
+- [第三章：Agent Memory 机制是怎么做的](./analysis/04-agent-memory.md)
+- [第四章：Skills 的技术实现细节与运行方式](./analysis/04c-skills-implementation.md)
+- [第五章：Tool Call 机制实现细节](./analysis/04b-tool-call-implementation.md)
+- [第六章：MCP 技术实现细节与运行机制](./analysis/04d-mcp-implementation.md)
+- [第七章：Sandbox 技术实现细节与运行机制](./analysis/04e-sandbox-implementation.md)
 
 ### 第四部分：程序架构及亮点
 
-- [第九章：程序架构及亮点](./analysis/05-differentiators-and-comparison.md)
+- [第八章：程序架构及亮点](./analysis/05-differentiators-and-comparison.md)
 
 ### 第五部分：扩展分析
 
-- [第十章：额外探索与补充发现](./analysis/06-extra-findings.md)
-- [第十一章：隐藏命令、Feature Flags 与彩蛋](./analysis/11-hidden-features-and-easter-eggs.md)
+- [第九章：额外探索与补充发现](./analysis/06-extra-findings.md)
+- [第十章：隐藏命令、Feature Flags 与彩蛋](./analysis/11-hidden-features-and-easter-eggs.md)
 
 ### 第六部分：组件体系详解
 
@@ -118,17 +118,17 @@ claude-code-analysis/
 
 ### 第七部分：同类产品对比
 
-- [第十二章：同类产品对比](./analysis/08-competitive-comparison.md)
+- [第十一章：同类产品对比](./analysis/08-competitive-comparison.md)
 - [附录A：外部对比资料](./analysis/08-reference-comparison-sources.md)
 
 ### 第八部分：证据与资料
 
-- [第十三章：代码证据索引](./analysis/07-code-evidence-index.md)
+- [第十二章：代码证据索引](./analysis/07-code-evidence-index.md)
 - [附录B：src 详细文件树（含文件说明）](./analysis/10-src-file-tree.md)
 
 ### 第九部分：总结
 
-- [第十四章：总结结论](./analysis/09-final-summary.md)
+- [第十三章：总结结论](./analysis/09-final-summary.md)
 
 ---
 
