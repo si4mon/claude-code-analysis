@@ -2,7 +2,7 @@
 
 ## 事件背景
 
-美国东部时间2026年3月31日凌晨4点23分，安全研究者 [Chaofan Shou](https://x.com/Fried_rice) 发现 Anthropic 发布到 npm 的 Claude Code 包中，官方没有删除source map 文件, 这意味着 Claude Code 的完整 TypeScript 源码，51.2万行，1903个文件，全部泄露.
+美国东部时间2026年3月31日凌晨4点23分，安全研究者 [Chaofan Shou](https://x.com/Fried_rice) 在 X 发布[推文](https://x.com/Fried_rice/status/2038894956459290963?s=20), 发现 Anthropic 发布到 npm 的 Claude Code 包中，官方没有删除source map 文件, 这意味着 Claude Code 的完整 TypeScript 源码全部泄露, 包含 1902 个源文件以及 513,237 行代码.
 
 ## 目录结构
 
