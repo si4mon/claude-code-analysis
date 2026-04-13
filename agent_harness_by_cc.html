@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Claude Code Agent Harness Analysis</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif; line-height: 1.65; max-width: 1000px; margin: 32px auto; padding: 0 16px; color: #1f2937; }
+    h1,h2,h3 { color: #111827; }
+    h1 { border-bottom: 2px solid #e5e7eb; padding-bottom: 10px; }
+    .lead { background: #f8fafc; border-left: 4px solid #2563eb; padding: 12px 14px; }
+    .card { border: 1px solid #e5e7eb; border-radius: 10px; padding: 14px 16px; margin: 14px 0; }
+    .good { border-left: 4px solid #059669; }
+    .gap { border-left: 4px solid #dc2626; }
+    .value { color: #0f766e; font-weight: 600; }
+    table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; text-align: left; vertical-align: top; }
+    th { background: #f3f4f6; }
+    code { background: #f3f4f6; padding: 1px 4px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>Claude Code Agent Runtime 的 Harness Engineering 分析</h1>
+
+  <p class="lead">
+    <strong>核心论点：</strong>Claude Code 的稳定性不是来自“更强模型”本身，而是来自一个层层保护的 runtime harness：
+    主循环编排、上下文压缩恢复、动态工具暴露、结构化 I/O 与持久化链路共同作用，把复杂任务从“容易断裂”变成“可恢复推进”。
+  </p>
+
+  <h2>1. 叙事起点：为什么这套 runtime 值得分析</h2>
+  <p>
+    在复杂 agent 场景中，失败通常不发生在“模型不会答”，而发生在“工具调用中断、上下文爆炸、状态丢失、恢复失败”。
+    这份代码的价值在于：它把这些失败点显式工程化。主轴是 <code>query.ts</code>，它不是一次请求函数，而是一个可恢复的 agent 回合引擎。
+  </p>
+
+  <h2>2. 证据链：与 Harness 6 组件逐一对齐</h2>
+
+  <div class="card good">
+    <h3>2.1 推理引擎：动态选模 + 预算 + 回退</h3>
+    <ul>
+      <li>运行时根据权限模式与上下文规模选模（<code>getRuntimeMainLoopModel</code>）。</li>
+      <li>发生 fallback 时，清理 orphan 的中间状态，再重试，避免 tool_use/tool_result 链被污染。</li>
+      <li><code>task_budget</code> 与 <code>token_budget</code> 双预算并行，覆盖“整轮任务”而非单请求。</li>
+    </ul>
+    <p class="value">技术价值：把模型波动从“系统中断”降级为“可恢复分支”。</p>
+  </div>
+
+  <div class="card good">
+    <h3>2.2 计划与编排：主循环状态化 + 多停止条件</h3>
+    <ul>
+      <li><code>while(true)</code> + <code>State</code> 聚合跨轮状态，<code>transition.reason</code> 记录继续原因。</li>
+      <li>停止条件覆盖完成、hook 阻断、max turns、abort、预算到达、恢复失败等多个出口。</li>
+      <li>对 <code>stop_reason === 'tool_use'</code> 不可靠性做运行时补偿（以实际 tool_use block 为准）。</li>
+    </ul>
+    <p class="value">技术价值：把“何时停、为何继续”从隐式行为变成可观测语义。</p>
+  </div>
+
+  <div class="card good">
+    <h3>2.3 工具注册表：可见性前置治理 + 动态暴露</h3>
+    <ul>
+      <li><code>tools.ts</code> 统一组装 built-in + MCP 工具池，并做 deny 规则过滤。</li>
+      <li><code>services/api/claude.ts</code> 支持 ToolSearch 与 deferred loading：只把“已发现”的 deferred tools 真正发给 API。</li>
+      <li><code>Tool.ts</code> 定义统一契约（schema、并发安全、权限检查、结果大小限制等）。</li>
+    </ul>
+    <p class="value">技术价值：降低提示噪音与误调用，支持工具规模增长。</p>
+  </div>
+
+  <div class="card good">
+    <h3>2.4 内存与上下文：多层压缩管线 + 恢复回路</h3>
+    <ul>
+      <li>同一轮中组合使用 <code>toolResultBudget → snip → microcompact → collapse → autocompact</code>。</li>
+      <li>遇到 413 / media / max_output 等错误时，先 withheld，再尝试恢复（collapse drain / reactive compact / escalation）。</li>
+      <li>memory 与 skill prefetch 并行于流式生成，后置注入，减少阻塞。</li>
+    </ul>
+    <p class="value">技术价值：在“信息保真”和“token 可控”之间做动态平衡，而不是粗暴截断。</p>
+  </div>
+
+  <div class="card good">
+    <h3>2.5 状态与持久化：JSONL 事件流 + 恢复一致性</h3>
+    <ul>
+      <li><code>sessionStorage.ts</code> 维护 transcript / subagent 路径与 parentUuid 链一致性。</li>
+      <li>明确区分 transcript message 与 progress message，避免恢复链污染。</li>
+      <li><code>history.ts</code> 采用 lock + append，且大文本通过 hash 外置到 paste store。</li>
+    </ul>
+    <p class="value">技术价值：把“可恢复性”变成可工程化的底座能力。</p>
+  </div>
+
+  <div class="card good">
+    <h3>2.6 结构化输入输出：强约束 + 可恢复错误协议</h3>
+    <ul>
+      <li>工具输入统一 <code>inputSchema.safeParse</code>；失败返回结构化 <code>tool_result(is_error)</code>。</li>
+      <li>API 前统一消息归一化、tool-pair 修复、字段剥离，降低线上 400/格式错误。</li>
+      <li>权限、hooks、校验在执行前完成，确保 I/O 不只是“格式正确”，还“语义可执行”。</li>
+    </ul>
+    <p class="value">技术价值：输出能被后续步骤直接消费，减少链式故障传播。</p>
+  </div>
+
+  <h2>3. 反面证据：当前仍相对缺少的 Harness 实践</h2>
+
+  <div class="card gap">
+    <h3>3.1 缺少显式状态机定义层</h3>
+    <p>
+      当前实现接近状态机，但仍以多分支 <code>continue</code> 维护复杂流转。随着恢复路径增长，分支交互风险上升。
+    </p>
+    <p><strong>影响：</strong>变更验证成本升高，易出现边界条件回归。</p>
+  </div>
+
+  <div class="card gap">
+    <h3>3.2 持久化路径存在较多 best-effort 处理</h3>
+    <p>
+      历史/会话部分写入失败采用日志记录后继续（含 fire-and-forget），利于可用性但削弱强一致保障。
+    </p>
+    <p><strong>影响：</strong>少量场景下可能出现“用户感知已保存，实际未完整落盘”的恢复缺口。</p>
+  </div>
+
+  <div class="card gap">
+    <h3>3.3 多 agent 的全局调度语义仍偏轻量</h3>
+    <p>
+      目前已有作用域隔离与队列快照，但缺少更上层统一调度（公平性/背压/抢占）框架。
+    </p>
+    <p><strong>影响：</strong>高并发长任务场景下，尾延迟与资源争抢风险增加。</p>
+  </div>
+
+  <h2>4. 综合评估：技术价值与成熟度</h2>
+
+  <table>
+    <thead>
+      <tr>
+        <th>组件</th>
+        <th>技术价值</th>
+        <th>成熟度</th>
+        <th>可吸收点</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>推理引擎</td><td>动态选模 + 回退 + 预算</td><td>高</td><td>先恢复再报错</td></tr>
+      <tr><td>计划编排</td><td>多停止条件 + hooks</td><td>高</td><td>把继续/终止理由显式化</td></tr>
+      <tr><td>工具注册</td><td>defer + ToolSearch + deny 前置</td><td>高</td><td>分离“工具存在”与“工具暴露”</td></tr>
+      <tr><td>上下文管理</td><td>分层压缩 + 恢复回路</td><td>高</td><td>采用策略管线而非单摘要</td></tr>
+      <tr><td>状态持久化</td><td>链路一致性强</td><td>中高</td><td>优先保证可恢复主链</td></tr>
+      <tr><td>结构化 I/O</td><td>输入校验到输出协议闭环</td><td>高</td><td>把错误也做成可消费结构</td></tr>
+    </tbody>
+  </table>
+
+  <h2>5. 技术启发（结论）</h2>
+  <p>
+    这份仓库给出的最大启发是：<strong>稳定 agent 的关键不是单个“智能”模块，而是 runtime harness 的联合作用</strong>。
+    如果你的目标是“可靠地完成复杂任务”，建议按以下顺序建设：
+  </p>
+  <ol>
+    <li>先实现可恢复主循环（含停止条件与恢复分支）；</li>
+    <li>再实现结构化工具契约（schema/权限/错误协议）；</li>
+    <li>随后引入分层上下文压缩与预算治理；</li>
+    <li>最后完善多 agent 调度与长期记忆质量闭环。</li>
+  </ol>
+  <p>
+    这条路径的本质是：先让系统“不会轻易坏”，再让系统“越来越聪明”。
+  </p>
+</body>
+</html>
