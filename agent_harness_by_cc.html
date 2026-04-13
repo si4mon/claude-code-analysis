@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Claude Code Harness Runtime 深度源码映射分析</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif; line-height: 1.68; max-width: 1100px; margin: 28px auto; padding: 0 16px; color: #1f2937; }
+    h1,h2,h3 { color: #0f172a; }
+    h1 { border-bottom: 2px solid #e5e7eb; padding-bottom: 10px; }
+    .lead { background: #eff6ff; border-left: 4px solid #2563eb; padding: 12px 14px; }
+    .section { border: 1px solid #e5e7eb; border-radius: 10px; padding: 14px 16px; margin: 14px 0; }
+    .code-map { background: #f8fafc; border-left: 4px solid #0ea5e9; padding: 10px 12px; margin: 8px 0; }
+    .value { color: #0f766e; font-weight: 600; }
+    .risk { color: #b91c1c; font-weight: 600; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    th, td { border: 1px solid #e5e7eb; padding: 8px 10px; text-align: left; vertical-align: top; }
+    th { background: #f3f4f6; }
+    code { background: #f3f4f6; border-radius: 4px; padding: 1px 4px; }
+  </style>
+</head>
+<body>
+  <h1>Claude Code Agent Runtime：Harness Engineering 深度源码映射分析</h1>
+
+  <p class="lead">
+    <strong>主结论：</strong>Claude Code 的稳定性不是来自“更强模型”本身，而是 runtime harness 的工程组合：
+    状态化主循环、分层上下文压缩、结构化工具执行、可恢复错误处理、会话链路持久化。
+    本文按关键代码段（line-range）逐段解释“做了什么 + 有什么 harness 作用 + 缺失会怎样”。
+  </p>
+
+  <h2>一、故事主线：从 queryLoop 看系统如何“稳定完成任务”</h2>
+
+  <div class="section">
+    <h3>1）主循环不是普通函数，而是“多轮执行引擎”</h3>
+    <div class="code-map">
+      <strong>代码映射：</strong><code>src/query.ts</code> L241-L321
+    </div>
+    <p>
+      这里把跨轮状态（messages、toolUseContext、recovery 计数、transition reason）集中在 <code>State</code>，并用 <code>while(true)</code> 驱动。
+      这意味着系统从设计上就接受“会重试、会恢复、会继续下一轮”的 agent 现实。
+    </p>
+    <p class="value">Harness价值：计划与编排层具备可持续迭代能力，不依赖一次请求成功。</p>
+  </div>
+
+  <div class="section">
+    <h3>2）真正的上下文管理是“多层管线”，不是一次摘要</h3>
+    <div class="code-map">
+      <strong>代码映射：</strong><code>src/query.ts</code> L369-L447, L453-L543
+    </div>
+    <p>
+      每轮按顺序执行：tool result budget → snip → microcompact → context collapse → autocompact。
+      compact 成功会回灌边界消息；失败会记录 consecutiveFailures 供后续断路。
+    </p>
+    <p class="value">Harness价值：在 token 控制和信息保真之间做策略组合，避免单点压缩失效。</p>
+  </div>
+
+  <div class="section">
+    <h3>3）流式阶段先保证一致性，再保证速度</h3>
+    <div class="code-map">
+      <strong>代码映射：</strong><code>src/query.ts</code> L712-L741, L788-L825
+    </div>
+    <p>
+      如果 streaming fallback 发生，先 tombstone orphan 消息，避免污染 transcript；
+      对可恢复错误（413/max_output/media）先 withheld，不立刻向上层暴露，给恢复链留机会。
+    </p>
+    <p class="value">Harness价值：让上层客户端不会被“中间错误态”误导提前退出。</p>
+  </div>
+
+  <div class="section">
+    <h3>4）恢复链分级：轻恢复 → 重恢复 → 终止</h3>
+    <div class="code-map">
+      <strong>代码映射：</strong><code>src/query.ts</code> L1065-L1256
+    </div>
+    <p>
+      413 先尝试 collapse drain，再尝试 reactive compact；
+      max_output 先做 token cap 升档，再做最多 3 次 continuation。
+      只有这些都失败才终止并外显错误。
+    </p>
+    <p class="value">Harness价值：把“失败”改写为“可恢复流程”。</p>
+  </div>
+
+  <div class="section">
+    <h3>5）Stop Hooks 不是外挂，是主循环分支的一部分</h3>
+    <div class="code-map">
+      <strong>代码映射：</strong><code>src/query.ts</code> L1267-L1306；<code>src/query/stopHooks.ts</code> L65-L240
+    </div>
+    <p>
+      stop hooks 可返回 blockingErrors/preventContinuation；主循环会据此继续或终止。
+      代码还专门避免 reactive compact 与 stop hook 交互导致的死循环。
+    </p>
+    <p class="value">Harness价值：把“策略扩展点”纳入可验证执行图。</p>
+  </div>
+
+  <h2>二、工具系统：为什么它能“越多工具越稳定”</h2>
+
+  <div class="section">
+    <h3>1）契约层（Tool.ts）：先约束行为，再执行</h3>
+    <div class="code-map">
+      <strong>代码映射：</strong><code>src/Tool.ts</code> L158-L260, L362-L520
+    </div>
+    <p>
+      ToolUseContext 集中了模型、工具、权限、MCP、queryTracking；
+      Tool 接口定义了输入 schema、并发安全、destructive 标记、defer/alwaysLoad、权限检查等。
+    </p>
+    <p class="value">Harness价值：工具能力可治理，不是“随便 call 一个函数”。</p>
+  </div>
+
+  <div class="section">
+    <h3>2）注册层（tools.ts）：暴露前过滤 + 稳定排序</h3>
+    <div class="code-map">
+      <strong>代码映射：</strong><code>src/tools.ts</code> L193-L327, L345-L367
+    </div>
+    <p>
+      工具池由环境和 feature 组合；deny 规则在暴露前生效；
+      built-in 与 MCP 分区排序保证 prompt cache 稳定。
+    </p>
+    <p class="value">Harness价值：降低模型看到的无效工具噪音，同时维持缓存命中。</p>
+  </div>
+
+  <div class="section">
+    <h3>3）调度层（toolOrchestration）：并发与一致性折中</h3>
+    <div class="code-map">
+      <strong>代码映射：</strong><code>src/services/tools/toolOrchestration.ts</code> L19-L82, L91-L116
+    </div>
+    <p>
+      根据 <code>inputSchema.safeParse + isConcurrencySafe</code> 分批；并发批次执行后再顺序回放 contextModifier。
+    </p>
+    <p class="value">Harness价值：既提升吞吐，又避免并发修改上下文的竞态。</p>
+  </div>
+
+  <div class="section">
+    <h3>4）执行层（toolExecution）：错误也结构化</h3>
+    <div class="code-map">
+      <strong>代码映射：</strong><code>src/services/tools/toolExecution.ts</code> L578-L733
+    </div>
+    <p>
+      输入 schema 校验失败、业务 validate 失败，都返回结构化 <code>tool_result(is_error)</code>。
+      如果 deferred tool 的 schema 未下发，会给出明确恢复指令（先 ToolSearch 再重试）。
+    </p>
+    <p class="value">Harness价值：让 agent 能继续编排错误，而不是因异常崩链。</p>
+  </div>
+
+  <h2>三、API 组装层：把“工具动态性”和“结构化请求”对齐</h2>
+
+  <div class="section">
+    <div class="code-map">
+      <strong>代码映射：</strong><code>src/services/api/claude.ts</code> L1118-L1172, L1231-L1246, L1265-L1315
+    </div>
+    <ul>
+      <li>ToolSearch 按模型能力、模式、阈值启停；</li>
+      <li>deferred tools 只在“已发现”后进入本轮 schema；</li>
+      <li>请求前统一做 normalize、tool pair 修复、媒体上限裁剪。</li>
+    </ul>
+    <p class="value">Harness价值：大幅减少因 schema/消息形态不一致导致的 API 失败。</p>
+  </div>
+
+  <h2>四、状态与持久化：为什么“可恢复会话”不是口号</h2>
+
+  <div class="section">
+    <h3>1）history：锁写入 + 重试 + 语义撤销</h3>
+    <div class="code-map">
+      <strong>代码映射：</strong><code>src/history.ts</code> L106-L143, L291-L353, L442-L464
+    </div>
+    <p>
+      逆序读 history.jsonl，解析失败跳过；写入使用 lock；支持 removeLastFromHistory 语义撤销。
+    </p>
+  </div>
+
+  <div class="section">
+    <h3>2）sessionStorage：消息链约束</h3>
+    <div class="code-map">
+      <strong>代码映射：</strong><code>src/utils/sessionStorage.ts</code> L130-L156, L202-L229
+    </div>
+    <p>
+      progress 明确不入 transcript 主链，避免 parentUuid 分叉；会话路径按 session/project 管理，并限制大文件读取避免 OOM。
+    </p>
+    <p class="value">Harness价值：恢复时链路一致，避免“看起来有日志但恢复失败”。</p>
+  </div>
+
+  <h2>五、模型选择：推理引擎的可解释策略</h2>
+
+  <div class="section">
+    <div class="code-map">
+      <strong>代码映射：</strong><code>src/utils/model/model.ts</code> L61-L98, L145-L167
+    </div>
+    <p>
+      模型选择优先级清晰（会话覆盖 > 启动参数 > 环境变量 > settings > 默认）；
+      plan 模式可根据配置将模型提升到更适合规划的档位。
+    </p>
+  </div>
+
+  <h2>六、六大 Harness 组件的代码映射总表</h2>
+
+  <table>
+    <thead>
+      <tr><th>组件</th><th>功能点</th><th>代码映射</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>推理引擎</td><td>runtime 选模 + fallback + 预算</td><td>model.ts L61-L98/L145-L167；query.ts L893-L950/L1308-L1354</td></tr>
+      <tr><td>计划编排</td><td>状态化主循环 + 停止条件 + stop hooks</td><td>query.ts L241-L321/L1065-L1357；stopHooks.ts L65-L240</td></tr>
+      <tr><td>工具注册表</td><td>注册过滤 + 动态暴露 + 缓存稳定</td><td>tools.ts L193-L367；claude.ts L1118-L1246</td></tr>
+      <tr><td>内存上下文</td><td>多级压缩 + 恢复链 + prefetch</td><td>query.ts L369-L543/L1065-L1256/L1592-L1628</td></tr>
+      <tr><td>状态持久化</td><td>history/transcript 规则与容错</td><td>history.ts L106-L143/L291-L464；sessionStorage.ts L130-L229</td></tr>
+      <tr><td>结构化I/O</td><td>schema 校验 + pairing repair + 错误协议</td><td>toolExecution.ts L578-L733；claude.ts L1265-L1315</td></tr>
+    </tbody>
+  </table>
+
+  <h2>七、缺失点（带证据）</h2>
+
+  <div class="section">
+    <p><strong>1）显式状态机定义层不足：</strong>目前是隐式状态机（query.ts 多分支 continue + transition reason），可运行但维护复杂度高。</p>
+    <p class="risk">风险：新增恢复路径时更容易出现分支交互回归。</p>
+
+    <p><strong>2）持久化有 best-effort 分支：</strong>history parse 失败跳过、写入失败仅日志、外置文本 fire-and-forget。</p>
+    <p class="risk">风险：可用性优先，极端故障下强一致恢复语义可能不足。</p>
+
+    <p><strong>3）主循环职责偏重：</strong>query.ts 承担过多策略组合，后续演化成本高。</p>
+    <p class="risk">风险：改动局部策略时更容易牵动全局行为。</p>
+  </div>
+
+  <h2>八、技术启发（落地顺序）</h2>
+  <ol>
+    <li>先做状态化主循环与恢复分级；</li>
+    <li>再做工具契约和结构化错误协议；</li>
+    <li>再做分层上下文治理与预算联动；</li>
+    <li>最后完善多 agent 调度与长期记忆质量指标闭环。</li>
+  </ol>
+
+  <p>
+    这份源码最值得学习的不是“某个花哨功能”，而是：
+    <strong>它把失败路径也当作一等公民设计</strong>，这正是 harness engineering 的核心。
+  </p>
+</body>
+</html>
